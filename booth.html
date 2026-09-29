@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice booth</title>
+<style>
+  :root { --bg:#140c08; --bg2:#1e120c; --paper:#2a1a12; --ink:#f0dcc4; --muted:#b08968; --orange:#e07a2f; --ember:#ffb070; --green:#7dff9a; --red:#e24a3b; --line:#3d2418; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: Georgia, "Times New Roman", serif; line-height: 1.45; padding: 0 16px 60px; }
+  header { max-width: 860px; margin: 0 auto; padding: 22px 0 10px; }
+  h1 { font-size: 1.5rem; letter-spacing: .04em; }
+  .sub { color: var(--muted); font-size: .92rem; margin-top: 4px; }
+  main { max-width: 860px; margin: 0 auto; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
+  button { font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+  button:hover { border-color: var(--orange); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--orange); color: #1a0d05; border-color: var(--orange); }
+  button.rec { border-color: var(--red); }
+  button.rec.live { background: var(--red); color: #fff; }
+  button.keep { border-color: var(--green); }
+  .cast { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin-bottom: 14px; display: grid; gap: 8px; }
+  .cast label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: .92rem; }
+  select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; max-width: 260px; }
+  input[type=text] { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 5px 8px; min-width: 240px; }
+  .card { background: var(--bg2); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px; }
+  .card.kept { border-left: 3px solid var(--green); }
+  .card.stale { border-left: 3px solid var(--red); }
+  .meta { color: var(--muted); font-size: .8rem; letter-spacing: .05em; text-transform: uppercase; display: flex; gap: 10px; flex-wrap: wrap; }
+  .said { margin: 6px 0 10px; font-size: 1.05rem; }
+  .narr { color: var(--muted); font-style: italic; opacity: .6; }
+  .narr::before { content: " (text only: "; } .narr::after { content: ") "; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .state { color: var(--muted); font-size: .88rem; }
+  .state.ok { color: var(--green); }
+  .state.bad { color: var(--red); }
+  .meter { width: 160px; height: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 2px; overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--green); }
+  .bar { position: sticky; top: 0; background: var(--bg); padding: 8px 0; border-bottom: 1px solid var(--line); z-index: 2; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #mic { font-size: .88rem; color: var(--muted); }
+  details { margin-top: 18px; color: var(--muted); }
+  summary { cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Voice booth</h1>
+  <p class="sub">One speaker at a time. Record, listen, keep or redo. Say only what is in the quotes; greyed narration stays as text. A kept take plays in your app on this browser right away; open the app at the same address as this page. Words that change retire the take, and the line goes back to text.</p>
+</header>
+<main>
+  <div class="bar">
+    <span id="mic">mic: not asked yet</span>
+    <label class="state"><input type="checkbox" id="ns" checked> Cut steady noise (fans)</label>
+    <label class="state" for="mic-pick">Input <select id="mic-pick"><option value="">system default</option></select></label>
+    <button id="match" type="button" title="Brings this character's kept takes to one loudness. It cannot fix a take that hit the ceiling.">Match volume (this character)</button>
+    <button id="import" type="button" title="Pick audio files named by line id, like narrator-01.wav (tools/generate.py makes them)">Import takes</button>
+    <input id="import-files" type="file" accept="audio/*" multiple hidden>
+    <button id="dl-takes" type="button">Download kept takes</button>
+    <button id="dl-js" type="button">Download takes.js</button>
+    <button id="dl-credits" type="button">Download credits</button>
+  </div>
+  <div class="tabs" id="tabs" role="tablist" aria-label="Characters"></div>
+  <div id="cast"></div>
+  <div id="lines"></div>
+  <details id="retired-box" hidden><summary>Retired lines (words changed)</summary><div id="retired"></div></details>
+</main>
+<script src="script.js"></script>
+<script src="voice.js"></script>
+<script>
+(function () {
+  const NAMES = new Proxy({}, { get: (_, k) => (window.VOICE_NAMES && VOICE_NAMES[k]) || (typeof k === "string" ? k.charAt(0).toUpperCase() + k.slice(1) : k) });
+  const $ = (id) => document.getElementById(id);
+  const live = VOICE_SCRIPT.filter((l) => !l.retired);
+  const speakers = [...new Set(live.map((l) => l.speaker))];
+  let cur = speakers[0];
+  const kept = {};                         // id -> { take, stale }
+  const cast = JSON.parse(localStorage.getItem("voice_booth.cast") || "{}");
+  const saveCast = () => localStorage.setItem("voice_booth.cast", JSON.stringify(cast));
+
+  let loud = 0, stream = null, rec = null, chunks = [], recId = null, meterRaf = 0, cand = null, t0 = 0;
+  const pickMime = () => ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || "";
+  const ext = (m) => /wav/.test(m) ? "wav" : /ogg/.test(m) ? "ogg" : /mp4/.test(m) ? "m4a" : "webm";
+  const secs = (ms) => (ms / 1000).toFixed(1) + "s";
+  const shown = (l) => l.spoken || l.text;   // "spoken" is the words to say when the screen text has a label in front
+
+  async function loadKept() {
+    for (const k in kept) delete kept[k];
+    try {
+      for (const id of await VOICE.keys()) {
+        const t = await VOICE.get(id);
+        const line = VOICE_SCRIPT.find((l) => l.id === id);
+        if (t && line) kept[id] = { take: t, stale: t.text !== line.text || !!line.retired };
+      }
+    } catch (e) { $("mic").textContent = "mic: this browser will not keep takes here (" + e.message + ")"; }
+  }
+
+  // The mic list only carries names once the browser has allowed a mic, so the
+  // first Record fills it. Pick the good one, then Record again to switch.
+  async function fillMics() {
+    const pick = $("mic-pick"), was = pick.value;
+    const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput" && d.deviceId !== "default" && d.deviceId !== "communications");
+    pick.innerHTML = '<option value="">system default</option>' + devs.map((d, i) => `<option value="${d.deviceId}">${(d.label || "mic " + (i + 1)).replace(/</g, "&lt;")}</option>`).join("");
+    pick.value = devs.some((d) => d.deviceId === was) ? was : "";
+  }
+  async function ensureMic() {
+    const want = $("mic-pick").value;
+    const ns = $("ns").checked;
+    if (stream && stream._dev === want && stream._ns === ns) return true;
+    if (stream) stream.getTracks().forEach((tr) => tr.stop());
+    stream = null;
+    try {
+      const audio = { autoGainControl: false, noiseSuppression: ns, echoCancellation: false };
+      if (want) audio.deviceId = { exact: want };
+      stream = await navigator.mediaDevices.getUserMedia({ audio });
+      stream._dev = want; stream._ns = ns;
+      const label = stream.getAudioTracks()[0].label;
+      await fillMics();
+      $("mic-pick").value = want;
+      $("mic").textContent = "mic: " + (label || "ready");
+      return true;
+    } catch (e) {
+      $("mic").textContent = "mic: blocked (" + e.name + "). Allow it in the address bar, then try again.";
+      return false;
+    }
+  }
+
+  function meter(el) {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const an = ac.createAnalyser(); an.fftSize = 512;
+    ac.createMediaStreamSource(stream).connect(an);
+    const buf = new Uint8Array(an.fftSize);
+    const tick = () => {
+      an.getByteTimeDomainData(buf);
+      let peak = 0; for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+      const lvl = peak / 128;
+      loud = Math.max(loud, lvl);
+      el.style.width = Math.min(100, lvl * 100) + "%";
+      el.style.background = lvl > 0.9 ? "var(--red)" : lvl > 0.6 ? "var(--orange)" : "var(--green)";
+      meterRaf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => { cancelAnimationFrame(meterRaf); el.style.width = "0"; ac.close(); };
+  }
+
+  async function startRec(line, card) {
+    if (!(await ensureMic())) return;
+    VOICE.stop();
+    recId = line.id; chunks = []; cand = null; loud = 0;
+    const mime = pickMime();
+    rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    let stopMeter = () => {};
+    rec.onstop = () => {
+      stopMeter();
+      cand = { id: line.id, blob: new Blob(chunks, { type: rec.mimeType || mime }), mime: rec.mimeType || mime, text: line.text, ms: Date.now() - t0, peak: loud };
+      render();
+    };
+    t0 = Date.now();
+    rec.start();
+    render();
+    const el = document.querySelector(".meter i");
+    if (el) stopMeter = meter(el);
+  }
+  const stopRec = () => rec && rec.state !== "inactive" && rec.stop();
+
+  function playBlob(blob, speaker) {
+    VOICE.stop();
+    const url = URL.createObjectURL(blob);
+    const a = VOICE.element(url, speaker); VOICE.audio = a;
+    a.onended = () => URL.revokeObjectURL(url);
+    a.play();
+  }
+
+  function guide(line) {
+    VOICE.stop();
+    if (!window.speechSynthesis) return;
+    speechSynthesis.speak(new SpeechSynthesisUtterance(shown(line)));
+  }
+
+  function download(name, blob) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
+  // Volume. Decode, scale, write back as 16-bit WAV. This evens a quiet take
+  // out; it cannot repair one that hit the ceiling.
+  async function decode(blob) {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    try { return await ac.decodeAudioData(await blob.arrayBuffer()); } finally { ac.close(); }
+  }
+  function toWav(buf, gain) {
+    const d = buf.getChannelData(0), n = d.length, out = new DataView(new ArrayBuffer(44 + n * 2));
+    const w = (o, s) => [...s].forEach((c, i) => out.setUint8(o + i, c.charCodeAt(0)));
+    w(0, "RIFF"); out.setUint32(4, 36 + n * 2, true); w(8, "WAVEfmt "); out.setUint32(16, 16, true);
+    out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, buf.sampleRate, true);
+    out.setUint32(28, buf.sampleRate * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+    w(36, "data"); out.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) out.setInt16(44 + i * 2, Math.max(-1, Math.min(1, d[i] * gain)) * 32767, true);
+    return new Blob([out.buffer], { type: "audio/wav" });
+  }
+  const stats = (buf) => { const d = buf.getChannelData(0); let pk = 0, sq = 0; for (const v of d) { pk = Math.max(pk, Math.abs(v)); sq += v * v; } return { peak: pk, rms: Math.sqrt(sq / d.length) }; };
+  // gain wanted (a number, or "match" to a target loudness), never past 95% of the ceiling
+  async function relevel(id, want) {
+    const k = kept[id]; if (!k) return "";
+    const buf = await decode(k.take.blob), s = stats(buf);
+    if (!s.peak) return "silent";
+    const wanted = want === "match" ? 0.1 / Math.max(s.rms, 1e-4) : want;
+    const gain = Math.min(wanted, 0.95 / s.peak);
+    await VOICE.put(id, { ...k.take, blob: toWav(buf, gain), mime: "audio/wav" });
+    return gain < wanted * 0.999 ? "at the ceiling" : "";
+  }
+
+  function card(line, retired) {
+    const k = kept[line.id];
+    const d = document.createElement("div");
+    d.className = "card" + (k && !k.stale ? " kept" : "") + (k && k.stale ? " stale" : "");
+    const isRec = rec && rec.state === "recording" && recId === line.id;
+    const hasCand = cand && cand.id === line.id && !isRec;
+    d.innerHTML = `<div class="meta"><span>${line.id}</span><span>${line.scene}</span></div>
+      <p class="said"></p><div class="row"></div>`;
+    // Only what is inside the quotes is spoken. Narration between them stays text.
+    const said = d.querySelector(".said");
+    for (const part of shown(line).split(/(“[^”]*”)/)) {
+      if (!part.trim()) continue;
+      const s = document.createElement("span");
+      s.textContent = part;
+      if (!/^“/.test(part) && /“/.test(line.text)) s.className = "narr";
+      said.appendChild(s);
+    }
+    const row = d.querySelector(".row");
+    const btn = (label, cls, fn) => { const b = document.createElement("button"); b.type = "button"; b.textContent = label; if (cls) b.className = cls; b.onclick = fn; row.appendChild(b); return b; };
+    const note = (txt, cls) => { const s = document.createElement("span"); s.className = "state " + (cls || ""); s.textContent = txt; row.appendChild(s); };
+    if (retired) { if (k) { btn("Play", "", () => playBlob(k.take.blob, line.speaker)); btn("Delete take", "", async () => { await VOICE.del(line.id); await refresh(); }); } return d; }
+    if (isRec) {
+      btn("Stop", "rec live", stopRec);
+      const m = document.createElement("div"); m.className = "meter"; m.innerHTML = "<i></i>"; row.appendChild(m);
+      note("recording…");
+    } else if (hasCand) {
+      btn("Play take", "", () => playBlob(cand.blob, line.speaker));
+      btn("Keep", "keep", async () => {
+        await VOICE.put(cand.id, { blob: cand.blob, mime: cand.mime, text: cand.text, ms: cand.ms });
+        cand = null; await refresh();
+      });
+      btn("Redo", "rec", () => startRec(line, d));
+      note(secs(cand.ms) + " — not kept yet");
+      if (cand.peak > 0.95) note("TOO HOT: it hit the ceiling and is distorted. Lower the mic input volume or back off, then Redo.", "bad");
+      else if (cand.peak < 0.15) note("quiet: raise the mic input volume or come closer.", "bad");
+      else note("level good", "ok");
+    } else {
+      btn(k ? "Record again" : "Record", "rec", () => startRec(line, d));
+      btn("Hear it read", "", () => guide(line));
+      if (k) {
+        btn("Play kept", "", () => playBlob(k.take.blob, line.speaker));
+        btn("Louder", "", async () => { const r = await relevel(line.id, 1.5); await refresh(); if (r) $("mic").textContent = line.id + ": " + r + " — a hotter take cannot go louder."; });
+        btn("Download", "", () => download(line.id + "." + ext(k.take.mime), k.take.blob));
+        btn("Delete", "", async () => { await VOICE.del(line.id); await refresh(); });
+        if (k.stale) btn("Those are the words I said", "keep", async () => { await VOICE.put(line.id, { ...k.take, text: line.text }); await refresh(); });
+        note(k.stale ? "the game's words differ from this take's; it will not play" : "kept · " + secs(k.take.ms), k.stale ? "bad" : "ok");
+      } else note("no take — plays as text");
+    }
+    return d;
+  }
+
+  function render() {
+    const tabs = $("tabs"); tabs.innerHTML = "";
+    for (const sp of speakers) {
+      const ls = live.filter((l) => l.speaker === sp);
+      const n = ls.filter((l) => kept[l.id] && !kept[l.id].stale).length;
+      const b = document.createElement("button");
+      b.type = "button"; b.setAttribute("role", "tab"); b.setAttribute("aria-pressed", sp === cur);
+      b.textContent = `${NAMES[sp] || sp} ${n}/${ls.length}`;
+      b.onclick = () => { if (rec && rec.state === "recording") return; cur = sp; render(); };
+      tabs.appendChild(b);
+    }
+    const c = cast[cur] || {};
+    $("cast").innerHTML = `<div class="cast"><label>Voiced by <input type="text" id="who" placeholder="name as it should read in the credits"></label>
+      <label><input type="checkbox" id="okay"> They said yes, and it is written down (CREDITS.md)</label></div>`;
+    if (VOICE.FX[cur]) $("cast").insertAdjacentHTML("beforeend", '<p class="sub">Record or import this one plain. The game plays it through the ' + (NAMES[cur] || cur) + ' filter, and Play here does too.</p>');
+    $("who").value = c.who || ""; $("okay").checked = !!c.okay;
+    $("who").oninput = () => { cast[cur] = { ...(cast[cur] || {}), who: $("who").value }; saveCast(); };
+    $("okay").onchange = () => { cast[cur] = { ...(cast[cur] || {}), okay: $("okay").checked }; saveCast(); };
+    const box = $("lines"); box.innerHTML = "";
+    live.filter((l) => l.speaker === cur).forEach((l) => box.appendChild(card(l)));
+    const ret = VOICE_SCRIPT.filter((l) => l.retired && kept[l.id]);
+    $("retired-box").hidden = !ret.length;
+    $("retired").innerHTML = ""; ret.forEach((l) => $("retired").appendChild(card(l, true)));
+  }
+
+  async function refresh() { await loadKept(); render(); }
+
+  $("match").onclick = async () => {
+    const ids = live.filter((l) => l.speaker === cur && kept[l.id] && !kept[l.id].stale).map((l) => l.id);
+    if (!ids.length) { $("mic").textContent = "Nothing kept for " + (NAMES[cur] || cur) + " yet."; return; }
+    const capped = [];
+    for (const id of ids) if (await relevel(id, "match")) capped.push(id);
+    await refresh();
+    $("mic").textContent = "Matched " + ids.length + " take(s)." + (capped.length ? " Held at the ceiling, still quiet: " + capped.join(", ") + " (re-record those a little closer)." : "");
+  };
+  // Files named <line id>.<ext> become kept takes on that line's current words.
+  $("import").onclick = () => $("import-files").click();
+  $("import-files").onchange = async (e) => {
+    let got = 0; const skipped = [];
+    for (const file of e.target.files) {
+      const id = file.name.replace(/\.[^.]+$/, ""), line = live.find((l) => l.id === id);
+      if (!line) { skipped.push(file.name); continue; }
+      let ms = 0;
+      try { ms = Math.round((await decode(file)).duration * 1000); } catch (err) { skipped.push(file.name); continue; }
+      await VOICE.put(id, { blob: file, mime: file.type || "audio/wav", text: line.text, ms });
+      got += 1;
+    }
+    e.target.value = "";
+    await refresh();
+    $("mic").textContent = "Imported " + got + " take(s)." + (skipped.length ? " Skipped (no such line id, or not audio): " + skipped.join(", ") : "");
+  };
+  $("dl-takes").onclick = () => {
+    const ids = Object.keys(kept).filter((id) => !kept[id].stale);
+    if (!ids.length) return void ($("mic").textContent = "Nothing kept yet.");
+    ids.forEach((id, i) => setTimeout(() => download(id + "." + ext(kept[id].take.mime), kept[id].take.blob), i * 400));
+  };
+  $("dl-js").onclick = () => {
+    const map = {};
+    for (const id of Object.keys(kept).filter((i) => !kept[i].stale)) map[id] = { file: "takes/" + id + "." + ext(kept[id].take.mime), text: kept[id].take.text };
+    download("takes.js", new Blob(["/* Written by voice_booth.html. Audio goes in voice/takes/. */\nvar VOICE_FILES = " + JSON.stringify(map, null, 1) + ";\n"], { type: "text/javascript" }));
+  };
+  $("dl-credits").onclick = () => {
+    let s = "# Voice credits\n\nWho lent a voice, and that they said yes. A voice does not ship without a yes on this page.\n\n";
+    for (const sp of speakers) {
+      const n = live.filter((l) => l.speaker === sp && kept[l.id] && !kept[l.id].stale).length, c = cast[sp] || {};
+      s += `- ${NAMES[sp] || sp}: ${c.who || "(nobody named)"} — ${n} of ${live.filter((l) => l.speaker === sp).length} lines — okay on record: ${c.okay ? "yes" : "NO"}\n`;
+    }
+    download("CREDITS.md", new Blob([s], { type: "text/markdown" }));
+  };
+
+  fillMics().catch(() => {});
+  refresh();
+})();
+</script>
+</body>
+</html>

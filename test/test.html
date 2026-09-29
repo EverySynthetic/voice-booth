@@ -1,0 +1,55 @@
+<!doctype html><meta charset="utf-8"><title>voice-booth tests</title>
+<pre id="out">running</pre>
+<script src="../script.js"></script><script src="../voice.js"></script>
+<script>
+// Headless: chromium --headless=new --allow-file-access-from-files --virtual-time-budget=20000 --dump-dom test/test.html
+const out = [], ok = (c, m) => { out.push((c ? "PASS " : "FAIL ") + m); document.getElementById("out").textContent = out.join("\n"); };
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  const S = VOICE_SCRIPT, live = S.filter((l) => !l.retired), a = live[0];
+  ok(live.length >= 4 && new Set(S.map((l) => l.id)).size === S.length && S.every((l) => l.id && l.speaker && l.text), "the example script loads with unique ids");
+  ok(VOICE.lineFor("<p>" + a.text + "</p>") === a && VOICE.lineFor("Not a line.") === null, "a line is found by its words, tags and all");
+  // the store round trip (skipped where the browser has no IndexedDB)
+  let stored = null;
+  const within = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+  try { await within(VOICE.put(a.id, { blob: new Blob(["x"], { type: "audio/wav" }), mime: "audio/wav", text: a.text, ms: 1 }), 1500); stored = await within(VOICE.get(a.id), 1500); } catch (e) { /* none, or file:// blocks it */ }
+  if (stored) {
+    ok(stored.text === a.text, "a take survives the store");
+    await within(VOICE.del(a.id), 1500);
+    ok(!(await within(VOICE.get(a.id), 1500)), "and can be deleted");
+  } else ok(true, "no IndexedDB here: store test skipped");
+  // a shipped file plays only on the words it was made on
+  window.VOICE_FILES = { [a.id]: { file: "takes/a.webm", text: a.text }, [live[1].id]: { file: "takes/b.webm", text: "older words" } };
+  const t1 = await VOICE.take(a), t2 = await VOICE.take(live[1]);
+  ok(t1 && t1.url === "takes/a.webm" && t2 === null, "a shipped take plays on its words; on changed words it does not");
+  // say(): plays a take, keeps it on an unvoiced call, muted is silent
+  const played = [];
+  window.Audio = function (u) { played.push(u); return { play: () => Promise.resolve(), pause() {}, addEventListener() {}, set onended(f) {}, set onerror(f) {} }; };
+  VOICE.take = async (l) => l.id === a.id ? { url: "take:" + l.id, revoke: false } : null;
+  VOICE.say([a.text]); await wait(60);
+  ok(played.length === 1 && played[0] === "take:" + a.id, "say() plays the take: " + played);
+  const cur = VOICE.audio; VOICE.say(["Not a line."], true);
+  ok(VOICE.audio === cur, "a call with nothing to say and keep set leaves the playing take alone");
+  VOICE.say(["Not a line."]);
+  ok(VOICE.audio === null, "a call without keep cuts it off");
+  VOICE.isMuted = () => true; VOICE.say([a.text]); await wait(60);
+  ok(played.length === 1, "muted, nothing plays");
+  VOICE.isMuted = () => false;
+  // filters: robot speakers are filtered, others are not; the graph passes speech and cuts rumble
+  const seen = []; const realChain = VOICE.chain; VOICE.chain = (el, fx) => { seen.push(fx.rate); return () => {}; };
+  VOICE.element("x", "narrator"); ok(seen.length === 0, "an unlisted speaker plays as recorded");
+  VOICE.element("x", "robot"); ok(seen.length === 1 && seen[0] < 1, "a listed speaker goes through its filter, deeper");
+  VOICE.chain = realChain;
+  const rms = async (hz) => {
+    const c = new OfflineAudioContext(1, 8000, 8000), buf = c.createBuffer(1, 8000, 8000), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = 0.5 * Math.sin(2 * Math.PI * hz * i / 8000);
+    const src = c.createBufferSource(); src.buffer = buf; VOICE.graph(c, src, VOICE.FX.robot, c.destination); src.start();
+    const o = (await c.startRendering()).getChannelData(0); let q = 0, pk = 0;
+    for (let i = 2000; i < o.length; i++) { q += o[i] * o[i]; pk = Math.max(pk, Math.abs(o[i])); }
+    return { rms: Math.sqrt(q / (o.length - 2000)), pk };
+  };
+  const sp = await rms(1000), ru = await rms(60);
+  ok(sp.rms > 0.05 && sp.pk <= 1 && ru.rms < sp.rms * 0.5, "the robot graph passes 1 kHz and holds 60 Hz well below it: " + sp.rms.toFixed(3) + " vs " + ru.rms.toFixed(3));
+  document.getElementById("out").textContent = out.join("\n") + "\n" + (out.some((l) => l.startsWith("FAIL")) ? "RESULT: FAIL" : "RESULT: PASS");
+})().catch((e) => { document.getElementById("out").textContent = out.join("\n") + "\nFAIL stopped: " + e.message + "\nRESULT: FAIL"; });
+</script>

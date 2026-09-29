@@ -1,0 +1,5 @@
+generated/
+audition/
+kokoro/
+.venv/
+node_modules/

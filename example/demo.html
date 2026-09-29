@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>voice-booth demo</title>
+<style>:root{--bg:#f6f4ef;--ink:#1c1b19;--muted:#6b675f}@media (prefers-color-scheme:dark){:root{--bg:#161513;--ink:#ece8df;--muted:#9a958a}}
+body{font:1.05rem/1.5 Georgia,serif;background:var(--bg);color:var(--ink);max-width:40rem;margin:2rem auto;padding:0 16px}
+button{font:inherit;padding:6px 12px;cursor:pointer}p{margin:.8rem 0}.hint{color:var(--muted);font-size:.9rem}</style></head>
+<body>
+<h1>Demo</h1>
+<p class="hint">Click a button to show a scene. Lines with a recorded take (kept in booth.html at this same address) play; the rest stay text. Add <code>?guide=1</code> to have the browser read the rest.</p>
+<p><button id="a">Scene: Intro</button> <button id="b">Scene: Bridge</button></p>
+<div id="scene"></div>
+<script src="../script.js"></script><script src="../takes.js"></script><script src="../voice.js"></script>
+<script>
+const scenes = {
+  a: ["“Welcome to Dock Nine. Mind the gap, and mind your manners.”", "“Nobody has ever left Dock Nine the same way they arrived.”"],
+  b: ["“Hold her steady. We are not paying for another hull.”", "PROXIMITY ALERT. SOMETHING LARGE IS APPROACHING THE DOCK."],
+};
+for (const k of Object.keys(scenes)) document.getElementById(k).onclick = () => {
+  const box = document.getElementById("scene"); box.innerHTML = "";
+  for (const t of scenes[k]) { const p = document.createElement("p"); p.textContent = t; box.appendChild(p); }
+  VOICE.scan(box);          // plays, in order, every line that has a take
+};
+</script></body></html>

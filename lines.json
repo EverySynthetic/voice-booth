@@ -1,0 +1,6 @@
+[
+  { "speaker": "narrator", "scene": "Intro", "text": "“Welcome to Dock Nine. Mind the gap, and mind your manners.”" },
+  { "speaker": "narrator", "scene": "Intro", "text": "“Nobody has ever left Dock Nine the same way they arrived.”" },
+  { "speaker": "captain", "scene": "Bridge", "text": "“Hold her steady. We are not paying for another hull.”" },
+  { "speaker": "robot", "scene": "Bridge", "text": "PROXIMITY ALERT. SOMETHING LARGE IS APPROACHING THE DOCK.", "spoken": "Proximity alert. Something large is approaching the dock." }
+]
