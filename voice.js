@@ -70,6 +70,9 @@ VOICE.take = async (line) => {
    rate < 1 drops the pitch (and slows it a touch); ring is a ring-modulator
    pitch in Hz, ringMix how much of it; band is the telephone speaker window;
    drive is how hard the last stage clips. */
+// How loud a speaker plays, 1 = as recorded. Example: VOICE.LEVEL = { robot: 0.9 }.
+VOICE.LEVEL = {};
+
 VOICE.FX = {
   // Examples. Key by the speaker id used in lines.json.
   robot: { rate: 0.88, ring: 48, ringMix: 0.45, low: 7, band: [240, 3600], drive: 3 },   // deeper, buzzy, telephone-speaker
@@ -78,7 +81,7 @@ VOICE.FX = {
 
 // Wire a source node through the treatment to a destination. Split out so the
 // graph can be rendered offline and measured (tests) as well as played.
-VOICE.graph = (c, src, fx, dest) => {
+VOICE.graph = (c, src, fx, dest, level) => {
   const sum = c.createGain();
   const dry = c.createGain(); dry.gain.value = 1 - fx.ringMix;
   src.connect(dry); dry.connect(sum);
@@ -93,28 +96,36 @@ VOICE.graph = (c, src, fx, dest) => {
   const curve = new Float32Array(1024);
   for (let i = 0; i < curve.length; i++) { const x = i / 512 - 1; curve[i] = Math.tanh(fx.drive * x) / Math.tanh(fx.drive); }
   shape.curve = curve;
-  const out = c.createGain(); out.gain.value = 0.8;
+  const out = c.createGain(); out.gain.value = 0.8 * (level == null ? 1 : level);
   sum.connect(low); low.connect(hp); hp.connect(lp); lp.connect(shape); shape.connect(out); out.connect(dest);
   osc.start();
   return () => { try { osc.stop(); out.disconnect(); } catch (e) { /* already stopped */ } };
 };
 
-VOICE.chain = (audio, fx) => {
+VOICE.chain = (audio, fx, level) => {
   const AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return () => {};
   const c = VOICE.ctx || (VOICE.ctx = new AC());
   if (c.state === "suspended") c.resume();
   audio.preservesPitch = false;
   audio.playbackRate = fx.rate;
-  return VOICE.graph(c, c.createMediaElementSource(audio), fx, c.destination);
+  return VOICE.graph(c, c.createMediaElementSource(audio), fx, c.destination, level);
 };
 
-// One take, one speaker: the element, filtered if that speaker has a treatment.
+// Every element made here is remembered until it ends, so stop() can silence
+// all of them, not just the last: one voice at a time, always.
+VOICE.live = new Set();
 VOICE.element = (url, speaker) => {
   const a = new Audio(url);
-  const fx = VOICE.FX[speaker];
-  const off = fx ? VOICE.chain(a, fx) : null;
-  if (off) a.addEventListener("ended", off, { once: true });
+  const fx = VOICE.FX[speaker], level = VOICE.LEVEL[speaker];
+  const off = fx ? VOICE.chain(a, fx, level) : null;
+  if (!fx && level != null) a.volume = level;
+  // Attached to the page, hidden: a loose element can have its play() promise
+  // rejected with AbortError ("removed from the document") while it goes on
+  // playing, which the queue used to read as "this line failed, start the next".
+  try { a.hidden = true; (document.body || document.documentElement).appendChild(a); } catch (e) { /* not a real element (tests) */ }
+  VOICE.live.add(a);
+  a.addEventListener("ended", () => { VOICE.live.delete(a); if (a.remove) a.remove(); if (off) off(); }, { once: true });
   return a;
 };
 
@@ -125,7 +136,9 @@ VOICE.muted = () => !!VOICE.isMuted();
 VOICE.stop = () => {
   VOICE.gen += 1;
   VOICE.queue = [];
-  if (VOICE.audio) { try { VOICE.audio.pause(); } catch (e) { /* already gone */ } VOICE.audio = null; }
+  for (const a of VOICE.live) { try { a.pause(); if (a.remove) a.remove(); } catch (e) { /* already gone */ } }
+  VOICE.live.clear();
+  VOICE.audio = null;
   try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch (e) { /* no synth */ }
 };
 
@@ -145,10 +158,23 @@ VOICE.say = (texts, keep) => {
     if (take) {
       const a = VOICE.element(take.url, line.speaker);
       VOICE.audio = a;
-      const done = () => { if (take.revoke) URL.revokeObjectURL(take.url); if (gen === VOICE.gen) next(); };
+      // ended, an error and a refused play() can all arrive for one take; only the first moves on.
+      let moved = false;
+      const done = () => {
+        if (moved) return;
+        moved = true;
+        VOICE.live.delete(a);
+        if (take.revoke) URL.revokeObjectURL(take.url);
+        if (gen === VOICE.gen) next();
+      };
       a.onended = done;
       a.onerror = done;
-      a.play().catch(done);   // a browser holds sound until the first click
+      // Only a refusal ends the line early (the browser holds sound until the
+      // first click). An AbortError is not a refusal: stop() causes it, and
+      // Chrome can raise it for a take that then plays anyway. ended decides.
+      a.play().catch((e) => { if (e && (e.name === "NotAllowedError" || e.name === "NotSupportedError")) done(); });
+      // A take that never starts must not hold the queue.
+      setTimeout(() => { if (!moved && gen === VOICE.gen && a.paused && !a.ended) done(); }, 3000);
     } else if (VOICE.guide && window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(line.spoken || line.text);
       u.onend = () => { if (gen === VOICE.gen) next(); };
